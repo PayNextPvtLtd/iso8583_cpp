@@ -37,6 +37,9 @@
 #include <Poco/DateTimeFormat.h>
 #include <Poco/DateTimeFormatter.h>
 #include <Poco/LocalDateTime.h>
+#include <Poco/Util/Application.h>
+#include <Poco/Crypto/DigestEngine.h>
+#include <Poco/NumberFormatter.h>
 
 #include <openssl/sha.h>
 
@@ -48,6 +51,7 @@
 #include <sys/time.h>
 #include <map>
 
+using namespace Poco::Util;
 using namespace Poco::Net;
 using namespace Poco;
 using namespace std;
@@ -60,9 +64,10 @@ public:
 
     static bool is_number(const std::string &s);
     static bool startsWith(string text, string token);
+    static bool endsWith(string text, string token);
 
     static string ofPostRequest(string url, string body, long timeout_secs);
-    static string ofPostRequest2(string url, string body, long timeout_secs);
+    static string ofPostRequest(string url, string body, long timeout_secs, map<string, string> headers);
     static string protect(string data);
     static string protectall(string data);
     static string resize(string input, int length, string padchar, bool left_justify);
@@ -73,11 +78,16 @@ public:
     static string str2bcd(string data);
     static string bcd2str(string data);
     static bool getSHA256(string input, string &output);
+    static string getSHA1(string input);
     static string convertHex2BIN(string data);
     static string convertBIN2Hex(string data);
     static long getTimeInMillis();
+    static string getF007();
     static string getF012();
     static string getF013();
+    static string getCurrentDateTime();
+    static string sendreceive(string request, string remoteip, int remoteport, int conntimeout, int requesttimeout);
+    static string printHexData(unsigned char *data, int size);
 };
 ///////////////////////////////////////////////////////////
 bool Utility::startsWith(string text, string token)
@@ -88,6 +98,18 @@ bool Utility::startsWith(string text, string token)
     }
 
     return (text.compare(0, token.length(), token) == 0);
+}
+///////////////////////////////////////////////////////////
+bool Utility::endsWith(string text, string token)
+{
+    if (text.length() < token.length())
+    {
+        return false;
+    }
+
+    int pos = text.length() - token.length();
+
+    return (text.compare(pos, token.length(), token) == 0);
 }
 ///////////////////////////////////////////////////////////
 long Utility::converttolong(string value, long defvalue)
@@ -211,15 +233,10 @@ string Utility::ofPostRequest(string url, string body, long timeout_secs)
 
 //////////////////////////////////////////////////////////////////////////////
 
-string Utility::ofPostRequest2(string url, string body, long timeout_secs)
+string Utility::ofPostRequest(string url, string body, long timeout_secs, map<string, string> headers)
 {
     try
     {
-        map<string, string> headers;
-        headers["Header"] = "Prime";
-        headers["Content-Type"] = "application/json";
-        headers["Connection"] = "keep-alive";
-
         // prepare session
         URI uri(url);
         HTTPClientSession session(uri.getHost(), uri.getPort());
@@ -238,7 +255,6 @@ string Utility::ofPostRequest2(string url, string body, long timeout_secs)
 
         // send request
         HTTPRequest req(HTTPRequest::HTTP_POST, path, HTTPMessage::HTTP_1_1);
-        //req.setContentType("application/x-www-form-urlencoded");
 
         // Set headers here
         for (map<string, string>::iterator it = headers.begin();
@@ -473,6 +489,18 @@ string Utility::str2bcd(string data)
     return bcd_conv;
 }
 /********************************************************************/
+string Utility::getSHA1(string input)
+{
+    string output("NA");
+
+    Poco::Crypto::DigestEngine engine("SHA1");
+    engine.update(input);
+
+    output = Poco::Crypto::DigestEngine::digestToHex(engine.digest());
+
+    return output;
+}
+/********************************************************************/
 bool Utility::getSHA256(string input, string &output)
 {
     SHA256_CTX context;
@@ -560,6 +588,16 @@ long Utility::getTimeInMillis()
 }
 
 /********************************************************************/
+string Utility::getF007()
+{
+    string f007;
+    LocalDateTime now;
+    f007 = Poco::DateTimeFormatter::format(now, "%m%d%H%M%S");
+
+    return f007;
+}
+
+/********************************************************************/
 string Utility::getF012()
 {
     string f012;
@@ -587,7 +625,7 @@ string Utility::bcd2str(string data)
     int i;
     int pos = 0;
 
-    int size = data.length()*2;
+    int size = data.length() * 2;
 
     temp = (char *)malloc(data.length() * 2 + 1);
 
@@ -600,6 +638,99 @@ string Utility::bcd2str(string data)
     value = convertToString(M_ToUCharPtr(temp), size);
 
     return value;
+}
+/********************************************************************/
+
+string Utility::getCurrentDateTime()
+{
+    LocalDateTime now;
+    string req = Poco::DateTimeFormatter::format(now, "%Y-%m-%d %H:%M:%s");
+
+    return req;
+}
+
+/*******************************************************************************
+ *
+ * 
+ ******************************************************************************/
+string Utility::sendreceive(string request, string remoteip, int remoteport, int conntimeout, int requesttimeout)
+{
+    string resp("IO");
+    SocketAddress _sockaddr(remoteip, remoteport);
+    StreamSocket _streamsock;
+
+    Poco::Timespan ts(conntimeout, 0);
+    Poco::Timespan ts_rxt(requesttimeout, 0);
+
+    string data_to_remote;
+    int msg_len;
+
+    int avlbl = 0;
+
+    try
+    {
+        request = Utility::str2bcd(request);
+
+        msg_len = request.length();
+        data_to_remote = Utility::str2bcd(Utility::resize(NumberFormatter::formatHex(msg_len), 4, "0", false)) + request;
+        _streamsock.connect(_sockaddr, ts);
+        int sentlen = _streamsock.sendBytes(data_to_remote.c_str(), msg_len + 2);
+
+        if (sentlen != msg_len + 2)
+        {
+            _streamsock.close();
+
+            return resp;
+        }
+
+        _streamsock.setReceiveTimeout(ts_rxt);
+
+        char *rsp_data = (char *)malloc(1000);
+        avlbl = _streamsock.receiveBytes(rsp_data, 1000);
+
+        if (avlbl > 0)
+        {
+            resp = Utility::convertToString(M_ToUCharPtr(rsp_data), avlbl);
+            resp = resp.substr(2, avlbl - 2);
+            resp = Utility::bcd2str(resp);
+        }else
+        {
+            resp = "IO";
+        }
+        
+        _streamsock.close();
+
+        free(rsp_data);
+    }
+    catch (const std::exception &e)
+    {
+        resp = "TO";
+    }
+
+    return resp;
+}
+
+/*******************************************************************************
+ *
+ * 
+ ******************************************************************************/
+string Utility::printHexData(unsigned char *data, int size)
+{
+    char msg[2048] = {0};
+    int i;
+
+    for (i = 0; i < size; i++)
+    {
+        sprintf(msg + strlen(msg), "%02X ", data[i]);
+        if (i % 16 == 15)
+        {
+            sprintf(msg + strlen(msg), "\r\n");
+        }
+    }
+
+    string s_msg(msg);
+
+    return s_msg;
 }
 
 #endif /* UTILITY_H */
